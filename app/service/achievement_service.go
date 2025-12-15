@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
-	mongoModel "clean-arch-copy/app/model/mongo"
-	pgModel "clean-arch-copy/app/model/postgre"
-	mongoRepo "clean-arch-copy/app/repository/mongo"
-	pgRepo "clean-arch-copy/app/repository/postgre"
+	mongoModel "UAS_BACKEND/app/model/mongo"
+	pgModel "UAS_BACKEND/app/model/postgre"
+	mongoRepo "UAS_BACKEND/app/repository/mongo"
+	pgRepo "UAS_BACKEND/app/repository/postgre"
 
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson/primitive"

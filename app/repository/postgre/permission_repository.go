@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	pgmodel "clean-arch-copy/app/model/postgre"
+	pgmodel "UAS_BACKEND/app/model/postgre"
 )
 
 // PermissionRepository defines data access for permissions.

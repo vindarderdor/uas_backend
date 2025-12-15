@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"time"
 
-	pgmodel "clean-arch-copy/app/model/postgre"
+	pgmodel "UAS_BACKEND/app/model/postgre"
 )
 
 type ActivityLogRepository interface {
