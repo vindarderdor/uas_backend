@@ -1,273 +1,162 @@
 package service
 
 import (
-	"clean-arch/app/model"
-	"clean-arch/app/repository"
-	"clean-arch/utils"
+	"context"
 	"errors"
-	"github.com/google/uuid"
-	
+	"os"
+	"time"
+
+	pgModel "clean-arch-copy/app/model/postgre"
+	pgRepo "clean-arch-copy/app/repository/postgre"
+
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
-type AuthService interface {
-	Login(req *model.LoginRequest) (*model.LoginResponse, error)
-	Register(req *model.RegisterRequest) (*model.RegisterResponse, error)
-	GetProfile(userID string) (*model.ProfileResponse, error)
-	RefreshToken(refreshToken string) (*model.RefreshResponse, error)
-	Logout(userID string) error
-	ValidateToken(token string) (*model.JWTClaims, error)
+// Definisikan interface untuk Token Repository di sini (atau import dari domain layer)
+// Implementasinya nanti bisa menggunakan Redis (disarankan) atau Database SQL
+type TokenRepository interface {
+	AddToBlacklist(ctx context.Context, token string, expiresAt time.Time) error
+	IsBlacklisted(ctx context.Context, token string) (bool, error)
 }
 
-type authService struct {
-	repo repository.AuthRepository
+type AuthService struct {
+	userRepo  pgRepo.UserRepository
+	tokenRepo TokenRepository // Tambahkan dependency ini
+	jwtSecret string
 }
 
-func NewAuthService(repo repository.AuthRepository) AuthService {
-	return &authService{repo: repo}
+// Update constructor untuk menerima tokenRepo
+// Note: Anda perlu mengupdate wiring di service_factory.go juga nantinya
+func NewAuthService(userRepo pgRepo.UserRepository, tokenRepo TokenRepository) *AuthService {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		secret = "dev-secret"
+	}
+	return &AuthService{
+		userRepo:  userRepo,
+		tokenRepo: tokenRepo,
+		jwtSecret: secret,
+	}
 }
 
-func (s *authService) Login(req *model.LoginRequest) (*model.LoginResponse, error) {
-	if req.Username == "" || req.Password == "" {
-		return &model.LoginResponse{
-			Status:  "error",
-			Message: "Username and password are required",
-		}, errors.New("invalid credentials")
-	}
-
-	// Get user from database
-	user, err := s.repo.GetUserByUsername(req.Username)
-	if err != nil {
-		return &model.LoginResponse{
-			Status:  "error",
-			Message: "Invalid credentials",
-		}, errors.New("user not found")
-	}
-
-	// Check if user is active
-	if !user.IsActive {
-		return &model.LoginResponse{
-			Status:  "error",
-			Message: "User account is inactive",
-		}, errors.New("user inactive")
-	}
-
-	// Verify password
-	if !utils.CheckPassword(req.Password, user.PasswordHash) {
-		return &model.LoginResponse{
-			Status:  "error",
-			Message: "Invalid credentials",
-		}, errors.New("invalid password")
-	}
-
-	// Get user permissions
-	permissions, err := s.repo.GetUserPermissions(user.ID.String())
-	if err != nil {
-		permissions = []string{}
-	}
-
-	// Generate JWT token
-	token, err := utils.GenerateToken(user, permissions)
-	if err != nil {
-		return &model.LoginResponse{
-			Status:  "error",
-			Message: "Failed to generate token",
-		}, err
-	}
-
-	// Generate refresh token (same for now, in production should be different)
-	refreshToken, err := utils.GenerateRefreshToken(user)
-	if err != nil {
-		return &model.LoginResponse{
-			Status:  "error",
-			Message: "Failed to generate refresh token",
-		}, err
-	}
-
-	roleName := ""
-	if user.Role != nil {
-		roleName = user.Role.Name
-	}
-
-	return &model.LoginResponse{
-		Status: "success",
-		Data: &model.LoginData{
-			Token:        token,
-			RefreshToken: refreshToken,
-			User: &model.UserResponse{
-				ID:          user.ID.String(),
-				Username:    user.Username,
-				Email:       user.Email,
-				FullName:    user.FullName,
-				Role:        roleName,
-				Permissions: permissions,
-				IsActive:    user.IsActive,
-				CreatedAt:   user.CreatedAt,
-				UpdatedAt:   user.UpdatedAt,
-			},
-		},
-	}, nil
+func (s *AuthService) HashPassword(password string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(b), err
 }
 
-func (s *authService) Register(req *model.RegisterRequest) (*model.RegisterResponse, error) {
-	// Validate request
-	if req.Username == "" || req.Email == "" || req.Password == "" || req.FullName == "" {
-		return &model.RegisterResponse{
-			Status:  "error",
-			Message: "All fields are required",
-		}, errors.New("missing required fields")
-	}
-
-	// Check if username exists
-	existingUser, _ := s.repo.GetUserByUsername(req.Username)
-	if existingUser != nil {
-		return &model.RegisterResponse{
-			Status:  "error",
-			Message: "Username already exists",
-		}, errors.New("username exists")
-	}
-
-	// Check if email exists
-	existingEmail, _ := s.repo.GetUserByEmail(req.Email)
-	if existingEmail != nil {
-		return &model.RegisterResponse{
-			Status:  "error",
-			Message: "Email already exists",
-		}, errors.New("email exists")
-	}
-
-	// Validate role exists
-	_, err := s.repo.GetRoleByID(req.RoleID)
-	if err != nil {
-		return &model.RegisterResponse{
-			Status:  "error",
-			Message: "Invalid role",
-		}, err
-	}
-
-	// Hash password
-	passwordHash, err := utils.HashPassword(req.Password)
-	if err != nil {
-		return &model.RegisterResponse{
-			Status:  "error",
-			Message: "Failed to process password",
-		}, err
-	}
-
-	// Create user
-	roleID, _ := uuid.Parse(req.RoleID)
-	newUser := &model.User{
-		Username:     req.Username,
-		Email:        req.Email,
-		PasswordHash: passwordHash,
-		FullName:     req.FullName,
-		RoleID:       roleID,
-		IsActive:     true,
-	}
-
-	createdUser, err := s.repo.CreateUser(newUser)
-	if err != nil {
-		return &model.RegisterResponse{
-			Status:  "error",
-			Message: "Failed to create user",
-		}, err
-	}
-
-	// Get permissions
-	permissions, _ := s.repo.GetUserPermissions(createdUser.ID.String())
-
-	// Get role details
-	role, _ := s.repo.GetRoleByID(req.RoleID)
-
-	return &model.RegisterResponse{
-		Status: "success",
-		Data: &model.UserResponse{
-			ID:          createdUser.ID.String(),
-			Username:    createdUser.Username,
-			Email:       createdUser.Email,
-			FullName:    createdUser.FullName,
-			Role:        role.Name,
-			Permissions: permissions,
-			IsActive:    createdUser.IsActive,
-			CreatedAt:   createdUser.CreatedAt,
-			UpdatedAt:   createdUser.UpdatedAt,
-		},
-		Message: "User created successfully",
-	}, nil
+func (s *AuthService) ComparePassword(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-func (s *authService) GetProfile(userID string) (*model.ProfileResponse, error) {
-	user, err := s.repo.GetUserByID(userID)
+// Login authenticates and returns JWT token
+func (s *AuthService) Login(ctx context.Context, username, password string) (string, *pgModel.User, error) {
+	user, err := s.userRepo.GetByUsername(ctx, username)
 	if err != nil {
-		return &model.ProfileResponse{
-			Status:  "error",
-			Message: "User not found",
-		}, err
+		return "", nil, err
 	}
-
-	permissions, _ := s.repo.GetUserPermissions(userID)
-
-	roleName := ""
-	if user.Role != nil {
-		roleName = user.Role.Name
+	if user == nil {
+		return "", nil, errors.New("invalid credentials")
 	}
-
-	return &model.ProfileResponse{
-		Status: "success",
-		Data: &model.UserResponse{
-			ID:          user.ID.String(),
-			Username:    user.Username,
-			Email:       user.Email,
-			FullName:    user.FullName,
-			Role:        roleName,
-			Permissions: permissions,
-			IsActive:    user.IsActive,
-			CreatedAt:   user.CreatedAt,
-			UpdatedAt:   user.UpdatedAt,
-		},
-	}, nil
+	if err := s.ComparePassword(user.PasswordHash, password); err != nil {
+		return "", nil, errors.New("invalid credentials")
+	}
+	// create token
+	claims := jwt.MapClaims{
+		"sub":  user.ID,
+		"role": user.RoleID,
+		"exp":  time.Now().Add(24 * time.Hour).Unix(),
+		"iat":  time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	ss, err := token.SignedString([]byte(s.jwtSecret))
+	if err != nil {
+		return "", nil, err
+	}
+	return ss, user, nil
 }
 
-func (s *authService) RefreshToken(refreshTokenString string) (*model.RefreshResponse, error) {
-	// Validate refresh token
-	claims, err := utils.ValidateToken(refreshTokenString)
-	if err != nil {
-		return nil, errors.New("invalid refresh token")
+func (s *AuthService) Refresh(ctx context.Context, userID string) (string, error) {
+	if userID == "" {
+		return "", errors.New("user_id is required")
+	}
+	claims := jwt.MapClaims{
+		"sub": userID,
+		"exp": time.Now().Add(24 * time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	ss, err := token.SignedString([]byte(s.jwtSecret))
+	return ss, err
+}
+
+// Logout memasukkan token ke dalam blacklist hingga masa berlakunya habis
+// NOTE: Saya mengubah parameter userID menjadi tokenString karena untuk blacklist kita butuh tokennya
+func (s *AuthService) Logout(ctx context.Context, tokenString string) error {
+	if tokenString == "" {
+		return errors.New("token is required")
 	}
 
-	// Get user
-	user, err := s.repo.GetUserByID(claims.UserID.String())
+	// 1. Parse token tanpa verifikasi signature (hanya butuh klaim 'exp')
+	// Kita bisa gunakan ParseUnverified karena tujuan kita hanya membaca expiration time
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
 	if err != nil {
-		return nil, errors.New("user not found")
+		return err
 	}
 
-	// Get permissions
-	permissions, _ := s.repo.GetUserPermissions(user.ID.String())
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return errors.New("invalid token claims")
+	}
 
-	// Generate new tokens
-	newToken, err := utils.GenerateToken(user, permissions)
+	// 2. Ambil waktu kadaluarsa (exp)
+	expFloat, ok := claims["exp"].(float64)
+	if !ok {
+		return errors.New("token does not have expiration time")
+	}
+	
+	expiresAt := time.Unix(int64(expFloat), 0)
+	
+	// Jika token sudah expired, tidak perlu di-blacklist
+	if time.Now().After(expiresAt) {
+		return nil 
+	}
+
+	// 3. Simpan token ke blacklist repository
+	// Token akan disimpan di DB/Redis sampai waktu 'expiresAt' tercapai
+	return s.tokenRepo.AddToBlacklist(ctx, tokenString, expiresAt)
+}
+
+func (s *AuthService) VerifyToken(tokenString string) (map[string]interface{}, error) {
+	// 1. Cek apakah token ada di blacklist
+	if s.tokenRepo != nil {
+		isBlacklisted, err := s.tokenRepo.IsBlacklisted(context.Background(), tokenString)
+		if err != nil {
+			// Fail safe: jika DB error, anggap invalid atau log error
+			return nil, err 
+		}
+		if isBlacklisted {
+			return nil, errors.New("token has been invalidated (logged out)")
+		}
+	}
+
+	// 2. Standard JWT verification
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return []byte(s.jwtSecret), nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	newRefreshToken, err := utils.GenerateRefreshToken(user)
-	if err != nil {
-		return nil, err
+	if !token.Valid {
+		return nil, errors.New("invalid token")
 	}
 
-	return &model.RefreshResponse{
-		Token:        newToken,
-		RefreshToken: newRefreshToken,
-	}, nil
-}
-
-func (s *authService) Logout(userID string) error {
-	// In a real application, you might want to:
-	// 1. Invalidate tokens in Redis/cache
-	// 2. Update last logout time in database
-	// For now, logout is handled client-side by removing the token
-	return nil
-}
-
-func (s *authService) ValidateToken(token string) (*model.JWTClaims, error) {
-	return utils.ValidateToken(token)
+	if claims, ok := token.Claims.(jwt.MapClaims); ok {
+		return claims, nil
+	}
+	return nil, errors.New("invalid token claims")
 }
